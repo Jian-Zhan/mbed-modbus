@@ -29,55 +29,60 @@
 #include "mb.h"
 #include "mbport.h"
 
-
 /* ----------------------- static functions ---------------------------------*/
 static void prvvUARTTxReadyISR( void );
 static void prvvUARTRxISR( void );
-static void prvvUARTISR( void );
 
 /* ----------------------- System Variables ---------------------------------*/
-Serial pc(USBTX, USBRX);            // Cam - mbed USB serial port
+Serial rs485(RS485_TX, RS485_RX);
 
-Ticker simISR;                      // Cam - mbed ticker
-                                    // we don't have the TX buff empty interrupt, so
-                                    // we just interrupt every 1 mSec and read RX & TX
-                                    // status to simulate the proper ISRs.
+extern UART_HandleTypeDef uart_handlers[3];
+UART_HandleTypeDef *huart = &uart_handlers[2]; // USART3
 
-static BOOL RxEnable, TxEnable;     // Cam - keep a static copy of the RxEnable and TxEnable
-                                    // status for the simulated ISR (ticker)
-
-
-/* ----------------------- Start implementation -----------------------------*/
-// Cam - This is called every 1mS to simulate Rx character received ISR and
-// Tx buffer empty ISR.
-static void
-prvvUARTISR( void )
-{
-    if (TxEnable)
-        if(pc.writeable())
-            prvvUARTTxReadyISR();
-            
-    if (RxEnable)
-        if(pc.readable())
-            prvvUARTRxISR();          
-}
+DigitalOut RS485_RNE(PC_4), RS485_DE(PC_5); // Needed for MAX3485
+DigitalOut LED_RNE(LED2); // Indicator LED
 
 void
 vMBPortSerialEnable( BOOL xRxEnable, BOOL xTxEnable )
 {
-    /* If xRXEnable enable serial receive interrupts. If xTxENable enable
-     * transmitter empty interrupts.
-     */
-    RxEnable = xRxEnable;
-    TxEnable = xTxEnable;
+    __disable_irq();
+    // printf("Rx: %d, Tx: %d", xRxEnable, xTxEnable);
+    if (xRxEnable) {
+        __HAL_UART_ENABLE_IT(huart, UART_IT_RXNE);
+        RS485_RNE = 0;
+        LED_RNE = 0;
+    }
+    else {
+        __HAL_UART_DISABLE_IT(huart, UART_IT_RXNE);
+        RS485_RNE = 1;
+        LED_RNE = 1;
+    }
+
+    if (xTxEnable) {
+        __HAL_UART_ENABLE_IT(huart, UART_IT_TXE);
+        RS485_DE = 1;
+    }
+    else {
+        __HAL_UART_DISABLE_IT(huart, UART_IT_TXE);
+        RS485_DE = 0;
+    }
+    // printf(" done.\n");
+    __enable_irq();
 }
 
 BOOL
 xMBPortSerialInit( UCHAR ucPORT, ULONG ulBaudRate, UCHAR ucDataBits, eMBParity eParity )
 {
-    simISR.attach_us(&prvvUARTISR,1000);    // Cam - attach prvvUARTISR to a 1mS ticker to simulate serial interrupt behaviour
-                                            // 1mS is just short of a character time at 9600 bps, so quick enough to pick
-                                            // up status on a character by character basis.
+    rs485.baud(115200);
+    rs485.format(8, SerialBase::None, 1);
+    //rs485.abort_read();
+    //rs485.abort_write();
+
+    __disable_irq();
+    rs485.attach(&prvvUARTRxISR, SerialBase::RxIrq);
+    rs485.attach(&prvvUARTTxReadyISR, SerialBase::TxIrq);
+    __HAL_UART_DISABLE_IT(huart, UART_IT_TXE);
+    __enable_irq();
     return TRUE;
 }
 
@@ -87,7 +92,8 @@ xMBPortSerialPutByte( CHAR ucByte )
     /* Put a byte in the UARTs transmit buffer. This function is called
      * by the protocol stack if pxMBFrameCBTransmitterEmpty( ) has been
      * called. */
-    pc.putc( ucByte);
+    rs485.putc(ucByte);
+    while (__HAL_UART_GET_FLAG(huart, UART_FLAG_TXE) == 0);
     return TRUE;
 }
 
@@ -97,7 +103,8 @@ xMBPortSerialGetByte( CHAR * pucByte )
     /* Return the byte in the UARTs receive buffer. This function is called
      * by the protocol stack after pxMBFrameCBByteReceived( ) has been called.
      */
-    * pucByte = pc.getc();
+    __HAL_UART_CLEAR_FLAG(huart, UART_FLAG_RXNE);
+    * pucByte = rs485.getc();
     return TRUE;
 }
 
@@ -109,6 +116,7 @@ xMBPortSerialGetByte( CHAR * pucByte )
  */
 static void prvvUARTTxReadyISR( void )
 {
+    // printf("TX ready\n");
     pxMBFrameCBTransmitterEmpty(  );
 }
 
@@ -119,6 +127,7 @@ static void prvvUARTTxReadyISR( void )
  */
 static void prvvUARTRxISR( void )
 {
+    // printf("RX received\n");
     pxMBFrameCBByteReceived(  );
 }
 
